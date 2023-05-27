@@ -1,4 +1,7 @@
 /* VERSION 0.1
+
+Author: Gerrit Wellecke
+
 This is a minimal version of the code that runs fully offline.
 WiFi functionality is on the horizon, but I recently redid my home server and I have no
 MQTT running right now. This will also likely end up in a home assistant and not NodeRED
@@ -8,7 +11,7 @@ as I once used it.
 #include <ESP8266WiFi.h>
 #include <SPI.h>
 
-#define debug
+#define debug // remove this in "production" system
 
 // Chip Select pin of shift register
 static const int CS_shiftreg{ 4 };
@@ -17,19 +20,24 @@ static const int OEpump{ 5 };
 // number of attached pumps
 static const int num_channels{ 4 };
 
-// duration of water flowing
+// duration in [s] of water flowing per watering
 static const int pump_delay{ 3 };
 // how many wake intervals are skipped before checking plants again
-static const int wake_skip{ 7 }; //TODO set this!
+static const int wake_skip{ 7 }; //TODO set this to water every 5-7 days
 // duration of deep sleep
 static const unsigned long long sleep_duration{ 6000000 }; // 6 Seconds
 //static const unsigned long long sleep_duration{ ESP.deepSleepMax() };
 
-// critical water level per plant in percent
-static int water_levels[4] { 20, 40, 60, 80 }; //TODO calibrate this somehow
+// amount of waterings per wake cycle, i.e. increments of `pump_delay`[s] of water flow
+static const int water_levels[4] { 2, 4, 6, 8 }; //TODO set number of "waterings"
 
 // function declarations
 void writeIntervalAndSleep(uint wake_interval);
+void waterPlants(
+    const int pump_delay,
+    const int water_levels[],
+    const int num_channels
+);
 
 
 void setup() {
@@ -69,39 +77,7 @@ void setup() {
     digitalWrite(CS_shiftreg, HIGH);
 
 
-    // turn on pumps as needed
-    byte pumps{ 0 };
-
-    // START REFACTOR
-    // determine status for each pump
-    for (int i=0; i<num_channels; i++) {
-        if (currentWaterings[i] <= water_levels[i]) // use time instead of readings
-            bitWrite(pumps, i, 1);
-        else
-            bitWrite(pumps, i, 0);
-    }
-
-    /*** write to shift register ***/
-    // activate shift register
-    digitalWrite(CS_shiftreg, LOW);
-    // transaction
-    SPI.beginTransaction(SPISettings(14000000, LSBFIRST, SPI_MODE0));
-    SPI.transfer(pumps);
-    SPI.endTransaction();
-    // deactivate shift register
-    digitalWrite(CS_shiftreg, HIGH);
-
-    // turn pumps on for certain time
-    digitalWrite(OEpump, LOW);
-#ifdef debug
-    Serial.println("Pumps on!");
-#endif
-    delay(pump_delay * 1000);
-    digitalWrite(OEpump, HIGH);
-#ifdef debug
-    Serial.println("Pumps off!");
-#endif
-    // END REFACTOR
+    waterPlants(pump_delay, water_levels, num_channels);
 
 
 #ifdef debug
@@ -120,4 +96,49 @@ void writeIntervalAndSleep(uint wake_interval) {
     ESP.rtcUserMemoryWrite(0, &wake_interval, sizeof(wake_interval));
     // sleep as long as possible
     ESP.deepSleep(sleep_duration, WAKE_RF_DISABLED);
+}
+
+void waterPlants(const int pump_delay, const int water_levels[], const int num_channels)
+{
+    // turn on pumps as needed
+    byte pumps{ 0 };
+    int currentWateringIdx{ 0 };
+
+    // water as long as originally requested
+    do {
+        // determine status for each pump
+        for (int i=0; i<num_channels; i++) {
+            if (currentWateringIdx <= water_levels[i]) // use time instead of readings
+                bitWrite(pumps, i, 1);
+            else
+                bitWrite(pumps, i, 0);
+        }
+
+        /*** write to shift register ***/
+        // activate shift register selection pin
+        digitalWrite(CS_shiftreg, LOW);
+        // transaction
+        SPI.beginTransaction(SPISettings(14000000, LSBFIRST, SPI_MODE0));
+        SPI.transfer(pumps);
+        SPI.endTransaction();
+        // deactivate shift register selection pin
+        digitalWrite(CS_shiftreg, HIGH);
+
+        // turn pumps on for certain time
+        digitalWrite(OEpump, LOW);
+#ifdef debug
+        Serial.println("Pumps on!");
+#endif
+        // water for `pump_delay` seconds
+        delay(pump_delay * 1000);
+
+        digitalWrite(OEpump, HIGH);
+#ifdef debug
+        Serial.println("Pumps off!");
+#endif
+        ++currentWateringIdx;
+
+        // pause 1s before next iteration
+        delay(1000);
+    } while (pumps != 0);
 }
