@@ -1,13 +1,14 @@
-#include "credentials.h"
+/* VERSION 0.1
+This is a minimal version of the code that runs fully offline.
+WiFi functionality is on the horizon, but I recently redid my home server and I have no
+MQTT running right now. This will also likely end up in a home assistant and not NodeRED
+as I once used it.
+*/
 #include <Arduino.h>
-#include <Adafruit_MCP3008.h>
 #include <ESP8266WiFi.h>
-//#include <PubSubClient.h>
 #include <SPI.h>
 
 #define debug
-
-Adafruit_MCP3008 adc;
 
 // Chip Select pin of shift register
 static const int CS_shiftreg{ 4 };
@@ -15,7 +16,6 @@ static const int CS_shiftreg{ 4 };
 static const int OEpump{ 5 };
 // number of attached pumps
 static const int num_channels{ 4 };
-
 
 // duration of water flowing
 static const int pump_delay{ 3 };
@@ -28,8 +28,12 @@ static const unsigned long long sleep_duration{ 6000000 }; // 6 Seconds
 // critical water level per plant in percent
 static int water_levels[4] { 20, 40, 60, 80 }; //TODO calibrate this somehow
 
+// function declarations
+void writeIntervalAndSleep(uint wake_interval);
+
+
 void setup() {
-    // read current wake interval
+    // read current wake interval from RTC memory
     uint wake_interval;
     bool read_rtc = ESP.rtcUserMemoryRead(0, &wake_interval, sizeof(wake_interval));
 
@@ -37,23 +41,16 @@ void setup() {
     // start serial debug
     Serial.begin(115200);
     while(!Serial);
-    Serial.println("Counter is: " + String(wake_interval));
+    Serial.println("Counter is: " + String(wake_interval / 1000000) + "s");
+    Serial.println("Maximum is: " + String(ESP.deepSleepMax()/ 1000000) + "s");
 #endif
-
-    // make sure that counter doesn't go through the roof
-    if (wake_interval > wake_skip)
-        wake_interval = 0;
 
     // we only want to do something every N times the MCU wakes up
     if (wake_interval % wake_skip != 0) {
 #ifdef debug
         Serial.println("Going to sleep - counter is only: " + String(wake_interval));
 #endif
-        // increment counter
-        ++wake_interval;
-        // write to RTC memory
-        ESP.rtcUserMemoryWrite(0, &wake_interval, sizeof(wake_interval));
-        ESP.deepSleep(sleep_duration, WAKE_RF_DISABLED);
+        writeIntervalAndSleep(wake_interval);
     }
     else
         wake_interval = 0;
@@ -72,22 +69,13 @@ void setup() {
     digitalWrite(CS_shiftreg, HIGH);
 
 
-    // read ADC channels 0-3
-    adc.begin(15); //TODO this should not be hard coded
-
-    int readings[num_channels]{};
-    for (int i=0; i<4; i++) {
-        readings[i] = adc.readADC(i) * 100 / 1023;
-#ifdef debug
-        Serial.println("Channel " + String(i) + ": " + String(readings[i]));
-#endif
-    }
-
     // turn on pumps as needed
     byte pumps{ 0 };
+
+    // START REFACTOR
     // determine status for each pump
     for (int i=0; i<num_channels; i++) {
-        if (readings[i] <= water_levels[i])
+        if (currentWaterings[i] <= water_levels[i]) // use time instead of readings
             bitWrite(pumps, i, 1);
         else
             bitWrite(pumps, i, 0);
@@ -113,39 +101,19 @@ void setup() {
 #ifdef debug
     Serial.println("Pumps off!");
 #endif
+    // END REFACTOR
 
-#ifdef MQTT
-    // turn WiFi on and transmit data
-    WiFi.forceSleepWake();
-    delay(1);
-    WiFi.persistent(false); // prevent credentials from being written to EEPROM
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(SSID, PASS);
 
 #ifdef debug
-    Serial.print("ESP ");
-    Serial.println(WiFi.macAddress());
-    Serial.print("Connecting to ");
-    Serial.println(SSID);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println();
-    Serial.print("WiFi connected - ESP IP address: ");
-    Serial.println(WiFi.localIP());
+    Serial.println("going to sleep for: " + String(sleep_duration / 1000000) + "s");
 #endif
+    writeIntervalAndSleep(wake_interval);
+}
 
-    // disconnect from wifi and go to deep sleep
-    WiFi.disconnect(true);
-#endif
+// loop will stay empty - we only run single shots between deep sleeps
+void loop() {}
 
-    delay(1);
-
-#ifdef debug
-    Serial.println("going to sleep for: " + String(sleep_duration));
-#endif
-    // TODO this is duplicate code
+void writeIntervalAndSleep(uint wake_interval) {
     // increment counter
     ++wake_interval;
     // write to RTC memory
@@ -153,6 +121,3 @@ void setup() {
     // sleep as long as possible
     ESP.deepSleep(sleep_duration, WAKE_RF_DISABLED);
 }
-
-// loop will stay empty - we only run single shots between deep sleeps
-void loop() {}
